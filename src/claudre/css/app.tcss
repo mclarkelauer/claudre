@@ -1,0 +1,84 @@
+Screen {
+    layout: vertical;
+}
+
+#header {
+    dock: top;
+    height: 1;
+    background: $accent;
+    color: $text;
+    text-align: center;
+    text-style: bold;
+}
+
+#body {
+    layout: horizontal;
+    height: 1fr;
+}
+
+ProjectTable {
+    width: 3fr;
+    height: 100%;
+}
+
+DetailPanel {
+    width: 2fr;
+    height: 100%;
+    padding: 1 2;
+    border-left: tall $accent;
+}
+
+#footer {
+    dock: bottom;
+    height: 1;
+    background: $surface;
+    color: $text-muted;
+    text-align: center;
+}
+
+/* Open project modal */
+OpenProjectScreen {
+    align: center middle;
+}
+
+#open-dialog {
+    width: 60;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#open-dialog ListView {
+    height: auto;
+    max-height: 20;
+    margin: 1 0;
+}
+
+#open-dialog Input {
+    margin: 1 0;
+}
+
+/* Confirm modal */
+ConfirmScreen {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 50;
+    height: auto;
+    border: thick $warning;
+    background: $surface;
+    padding: 1 2;
+}
+
+#confirm-dialog Horizontal {
+    align: center middle;
+    height: auto;
+    margin-top: 1;
+}
+
+#confirm-dialog Button {
+    margin: 0 1;
+}

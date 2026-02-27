@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claudre"
+version = "0.1.0"
+description = "Claude Session Manager TUI"
+requires-python = ">=3.12"
+dependencies = [
+    "textual>=1.0.0",
+    "click>=8.1",
+    "pydantic>=2.0",
+]
+
+[project.scripts]
+claudre = "claudre.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/claudre"]
