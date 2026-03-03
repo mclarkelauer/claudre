@@ -98,22 +98,26 @@ NewWindowScreen {
 }
 
 #new-window-dialog {
-    width: 70;
+    width: 72;
     height: auto;
-    max-height: 80%;
     border: thick $accent;
     background: $surface;
     padding: 1 2;
 }
 
-#new-window-dialog ListView {
-    height: auto;
-    max-height: 15;
-    margin: 1 0;
+#new-window-dialog Input {
+    margin: 1 0 0 0;
 }
 
-#new-window-dialog Input {
-    margin: 1 0;
+#completions {
+    height: auto;
+    max-height: 10;
+    margin: 0 0 1 0;
+    border: solid $accent;
+}
+
+#new-window-hint {
+    color: $text-muted;
 }
 
 /* Help screen */

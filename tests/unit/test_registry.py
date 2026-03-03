@@ -36,6 +36,7 @@ def make_registry() -> tuple[SessionRegistry, MagicMock, MagicMock, MagicMock, M
     tmux = MagicMock()
     tmux.list_panes = AsyncMock(return_value=[])
     tmux.current_session = AsyncMock(return_value="main")
+    tmux.current_window_index = AsyncMock(return_value="99")
     tmux._is_managed = AsyncMock(return_value=False)
     detector = MagicMock()
     detector.detect = AsyncMock(return_value=ClaudeState.IDLE)

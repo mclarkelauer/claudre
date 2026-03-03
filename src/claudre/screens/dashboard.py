@@ -137,14 +137,28 @@ class DashboardScreen(Screen):
     def on_row_highlighted(self, event: WindowTable.RowHighlighted) -> None:
         self._update_detail(None)
 
+    @on(WindowTable.RowSelected)
+    def on_row_selected(self, event: WindowTable.RowSelected) -> None:
+        self.action_jump()
+
     # ------------------------------------------------------------------ #
     # Actions
     # ------------------------------------------------------------------ #
 
     def action_jump(self) -> None:
         ws = self._selected_window()
-        if ws and ws.session and ws.window_index:
-            asyncio.ensure_future(self._tmux.select_window(ws.target))
+        if not ws or not ws.session or not ws.window_index:
+            return
+
+        async def _jump() -> None:
+            current_session = await self._tmux.current_session()
+            if ws.session != current_session:
+                log.debug("cross-session jump: %s -> %s", current_session, ws.target)
+                await self._tmux.switch_client(ws.target)
+            else:
+                await self._tmux.select_window(ws.target)
+
+        asyncio.ensure_future(_jump())
 
     def action_new_window(self) -> None:
         async def _do_new() -> None:

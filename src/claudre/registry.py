@@ -102,6 +102,25 @@ class SessionRegistry:
         if self._config.scope == "session" and current_session:
             panes = [p for p in panes if p.session == current_session]
 
+        # Skip the claudre dashboard window itself
+        dashboard_idx = await self._tmux.current_window_index()
+        dashboard_session = await self._tmux.current_session()
+        panes = [
+            p for p in panes
+            if not (p.session == dashboard_session and p.window_index == dashboard_idx
+                    and p.window_name == "claudre")
+        ]
+
+        # One representative pane per window — first pane wins
+        seen: set[tuple[str, str]] = set()
+        unique: list[TmuxPane] = []
+        for p in panes:
+            key = (p.session, p.window_index)
+            if key not in seen:
+                seen.add(key)
+                unique.append(p)
+        panes = unique
+
         pane_ids = {p.pane_id for p in panes}
         existing_ids = set(self._windows.keys())
 

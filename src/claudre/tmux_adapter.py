@@ -173,6 +173,10 @@ class TmuxAdapter:
     async def select_window(self, target: str) -> None:
         await self._run(["tmux", "select-window", "-t", target])
 
+    async def switch_client(self, target: str) -> None:
+        """Switch the tmux client to a window, crossing sessions if needed."""
+        await self._run(["tmux", "switch-client", "-t", target])
+
     async def set_window_option(self, target: str, opt: str, val: str) -> None:
         await self._run(["tmux", "set-option", "-w", "-t", target, opt, val])
 

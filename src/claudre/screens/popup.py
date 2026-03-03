@@ -37,6 +37,16 @@ class _Entry:
     state: ClaudeState
 
 
+def _pane_name(pane: TmuxPane) -> str:
+    """Build a descriptive title: last-two path components, fallback to window name."""
+    parts = Path(pane.pane_path).parts
+    if len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"
+    if parts:
+        return parts[-1]
+    return pane.window_name or pane.pane_id
+
+
 def _state_icon(state: ClaudeState) -> str:
     match state:
         case ClaudeState.WORKING:   return "◌"
@@ -82,9 +92,10 @@ class _WindowItem(ListItem):
         icon = _state_icon(self._entry.state)
         state_mu = _state_markup(self._entry.state)
         target = f"{self._entry.pane.target:<10}"
-        name = self._entry.name[:28]
+        name = self._entry.name[:32]
+        cmd = self._entry.pane.pane_command
         yield Static(
-            f"[dim]{target}[/]  {icon} {name:<28}  {state_mu}",
+            f"[dim]{target}[/]  {icon} {name}  [dim]· {cmd}[/]  {state_mu}",
             markup=True,
         )
 
@@ -137,13 +148,23 @@ class PopupScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        log.debug("PopupScreen mounted, starting window load")
         self.query_one("#filter-input", Input).focus()
         self.run_worker(self._load_windows(), exclusive=True)
 
     async def _load_windows(self) -> None:
+        log.debug("_load_windows: starting")
+        try:
+            await self._do_load_windows()
+        except Exception:
+            log.exception("_load_windows: unhandled error")
+            raise
+
+    async def _do_load_windows(self) -> None:
         tmux = TmuxAdapter()
         detector = JournalStateDetector()
         panes = await tmux.list_panes()
+        log.debug("_do_load_windows: got %d panes from tmux", len(panes))
 
         if self._config.scope == "session":
             session = await tmux.current_session()
@@ -176,11 +197,12 @@ class PopupScreen(Screen):
         self._all_entries = [
             _Entry(
                 pane=p,
-                name=p.window_name or Path(p.pane_path).name or p.pane_id,
+                name=_pane_name(p),
                 state=s if isinstance(s, ClaudeState) else ClaudeState.UNKNOWN,
             )
             for p, s in zip(unique, raw)
         ]
+        log.debug("_do_load_windows: loaded %d entries", len(self._all_entries))
         self._render_list("")
 
     def _render_list(self, needle: str) -> None:
@@ -191,6 +213,7 @@ class PopupScreen(Screen):
                 needle not in entry.name.lower()
                 and needle not in entry.state.value.lower()
                 and needle not in entry.pane.target.lower()
+                and needle not in entry.pane.pane_command.lower()
             ):
                 continue
             lst.append(_WindowItem(entry))
@@ -202,6 +225,7 @@ class PopupScreen(Screen):
 
     def on_key(self, event: Key) -> None:
         """Route arrow keys and Enter to the list while keeping filter focused."""
+        log.debug("on_key: %s", event.key)
         if event.key == "down":
             self._move_selection(1)
             event.prevent_default()
@@ -217,15 +241,17 @@ class PopupScreen(Screen):
 
     def _move_selection(self, delta: int) -> None:
         lst = self.query_one("#window-list", ListView)
-        count = lst.item_count
+        count = len(lst)
+        log.debug("_move_selection: delta=%d count=%d current_index=%s", delta, count, lst.index)
         if count == 0:
             return
         current = lst.index if lst.index is not None else -1
         lst.index = max(0, min(count - 1, current + delta))
+        log.debug("_move_selection: new_index=%s", lst.index)
 
     def _select_highlighted(self) -> None:
         lst = self.query_one("#window-list", ListView)
-        if lst.index is None or lst.item_count == 0:
+        if lst.index is None or len(lst) == 0:
             return
         item = lst._nodes[lst.index] if lst.index < len(lst._nodes) else None
         if isinstance(item, _WindowItem):
@@ -250,7 +276,12 @@ class PopupScreen(Screen):
     async def _switch_and_exit(self, entry: _Entry) -> None:
         try:
             tmux = TmuxAdapter()
-            await tmux.select_window(entry.pane.target)
+            current_session = await tmux.current_session()
+            if entry.pane.session != current_session:
+                log.debug("cross-session jump: %s -> %s", current_session, entry.pane.target)
+                await tmux.switch_client(entry.pane.target)
+            else:
+                await tmux.select_window(entry.pane.target)
         except Exception as e:
             log.warning("Failed to select window %s: %s", entry.pane.target, e)
         finally:
