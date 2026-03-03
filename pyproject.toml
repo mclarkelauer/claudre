@@ -1,16 +1,19 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "claudre"
-version = "0.1.0"
-description = "Claude Session Manager TUI"
+dynamic = ["version"]
+description = "Claude-native tmux session manager with AI summarization"
 requires-python = ">=3.12"
 dependencies = [
     "textual>=1.0.0",
     "click>=8.1",
     "pydantic>=2.0",
+    "anthropic>=0.40",
+    "psutil>=6.0",
+    "watchdog>=4.0",
 ]
 
 [project.scripts]
@@ -20,7 +23,15 @@ claudre = "claudre.cli:main"
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "hatch-vcs",
 ]
+
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/claudre"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

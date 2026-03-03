@@ -1,144 +1,164 @@
 # claudre
 
-Claude Session Manager TUI. A dashboard for managing multiple Claude Code instances running in tmux.
+AI-native tmux control plane. Keeps a live plain-English summary of every open tmux window so you always know what each Claude session is doing — without switching to it.
 
-## What it does
+## Requirements
 
-- Lists all your projects with git status, tmux window info, and Claude state (WORKING / WAITING / idle)
-- Opens new Claude sessions in properly named tmux windows with configurable layouts
-- Auto-discovers git repos from configured directories
-- Detects Claude's state by tail-reading JSONL session logs
-- Renames tmux windows to match project names
+- Python 3.12+
+- tmux
+- `ANTHROPIC_API_KEY` set in your environment (for AI summaries; optional — app works without it)
 
 ## Install
 
 ```bash
-# From source
-uv pip install -e .
+# Clone and install globally (claudre available on PATH in all shells)
+git clone <repo-url> claudre
+cd claudre/claudre
+make install        # uses pipx — isolated env, globally available
 
-# Or with dev dependencies
-uv pip install -e ".[dev]"
+# Alternative if you use uv:
+make install-uv
 ```
 
-## Setup
+**pipx** puts the `claudre` binary in `~/.local/bin` (added to PATH automatically by pipx). No venv activation needed — `claudre` just works.
+
+If you don't have pipx:
 
 ```bash
-# Discover repos and create initial config
-claudre init
+pip install --user pipx
+pipx ensurepath     # adds ~/.local/bin to PATH; restart your shell once
+```
 
-# Install tmux keybindings (prefix+d / prefix+D)
-claudre setup
+## First-time setup
+
+```bash
+claudre setup           # writes prefix+D and prefix+N bindings to ~/.tmux.conf
 tmux source ~/.tmux.conf
+```
+
+Then from inside any tmux session:
+
+```bash
+claudre dashboard       # open the dashboard (or: claudre)
 ```
 
 ## Usage
 
 ```bash
-claudre              # launch dashboard TUI (default)
-claudre dashboard    # same as above
-claudre popup        # popup mode — select a project and exit
-claudre list         # print status table to stdout
-claudre init         # scan for new repos, update config
-claudre rename       # rename all tmux windows running claude
-claudre setup        # install tmux keybindings
+claudre                 # open dashboard (default)
+claudre dashboard       # same — switches to existing dashboard if already open
+claudre popup           # quick window-switcher (designed for tmux display-popup)
+claudre new [template]  # stamp out a new window from a template
+claudre list            # print window status table to stdout (no TUI)
+claudre setup           # (re)install tmux keybindings
+claudre init            # scan auto_discover_dirs for new git repos
+claudre --debug         # enable debug logging
+claudre --log-file /tmp/claudre.log   # write logs to file
 ```
 
-### Dashboard keybindings
+## Dashboard keybindings
 
-| Key   | Action                                         |
-|-------|------------------------------------------------|
-| Enter | Open project (creates tmux window if needed)   |
-| x     | Close project (with confirmation)              |
-| r     | Manual refresh                                 |
-| q     | Quit                                           |
+| Key     | Action                                      |
+|---------|---------------------------------------------|
+| `Enter` | Jump to selected window                     |
+| `n`     | New window (template selector)              |
+| `x`     | Close selected window (confirmation)        |
+| `s`     | Send message to Claude pane                 |
+| `r`     | Run quick action / command in bash pane     |
+| `u`     | Force AI summary refresh                    |
+| `R`     | Force full registry refresh                 |
+| `/`     | Filter by name, path, state, or summary     |
+| `?`     | Help                                        |
+| `q`     | Quit dashboard (tmux session stays open)    |
 
-### Tmux keybindings (after `claudre setup`)
+## tmux keybindings (after `claudre setup`)
 
-| Key        | Action                                    |
-|------------|-------------------------------------------|
-| prefix + d | Switch to claudre window (creates if new) |
-| prefix + D | Open claudre popup                        |
+| Key        | Action                                             |
+|------------|----------------------------------------------------|
+| `prefix+D` | Jump to claudre dashboard (switch to existing one) |
+| `prefix+N` | Create new window using default template           |
+| `prefix+P` | Quick window-switcher popup                        |
 
 ## Configuration
 
-Config lives at `~/.claudre/config.toml`.
+Config lives at `~/.claudre/config.toml`. Created with defaults if absent.
 
 ```toml
-refresh_interval = 2.0
-auto_discover_dirs = ["/home/user/repos", "/home/user/work"]
+refresh_interval = 2.0          # seconds between tmux polls
+summary_interval = 30.0         # seconds between periodic AI summary refreshes
+ai_summaries = true             # set false to disable all API calls
+notification_on_waiting = true  # toast when a window transitions WORKING → WAITING
+status_bar_integration = false  # write summary to tmux status-right
+debug_log = ""                  # path to log file; empty = disabled
 
 [defaults]
 claude_command = "claude"
-dangerously_skip_permissions = true
-layout = "claude+terminal"       # or "claude+vim+terminal"
-model = ""                       # e.g. "sonnet", "opus"
+skip_permissions = false        # pass --dangerously-skip-permissions
+template = "claude+terminal"
+model = ""
 extra_args = ""
 
-# Per-project overrides (inherits from defaults)
-[projects.my-project]
-path = "/home/user/repos/my-project"
-layout = "claude+vim+terminal"
-model = "opus"
+[templates.claude+terminal]     # built-in — two panes side by side
+layout = "even-horizontal"
+pane_commands = ["claude", "bash"]
+pane_sizes = [50, 50]
+
+[templates.claude+vim+terminal] # built-in — claude left, vim+bash right
+layout = "main-left"
+pane_commands = ["claude", "vim", "bash"]
+pane_sizes = [50, 30, 20]
+
+# Custom template example
+[templates.my-setup]
+layout = "even-horizontal"
+pane_commands = ["claude --dangerously-skip-permissions", "bash"]
+pane_sizes = [60, 40]
+
+# Per-project config
+[projects.my-api]
+path = "/home/user/repos/my-api"
+template = "claude+vim+terminal"
+model = "claude-opus-4-6"
+quick_actions = ["make test", "make lint", "git pull --rebase"]
 ```
 
-### Layouts
+## Releasing
 
-- **`claude+terminal`** — two vertical panes: claude left, bash right
-- **`claude+vim+terminal`** — claude left, vim top-right, bash bottom-right
+Versions are derived automatically from git tags via `hatch-vcs`. There is no version field to edit manually.
 
-### Auto-discovery
+```bash
+# 1. Make sure tests pass and the working tree is clean
+make test
 
-Directories listed in `auto_discover_dirs` are scanned every refresh cycle. Any new git repos found are automatically added to the config.
+# 2. Tag and push
+make release VERSION=3.1.0
 
-## Architecture
-
-```
-src/claudre/
-  cli.py              Click CLI — entry point, subcommands
-  app.py              Textual App shell
-  config.py           TOML config loading, Pydantic models, project discovery
-  models.py           Data models: ProjectState, ClaudeState, VcsStatus, TmuxWindow
-  tmux.py             Subprocess wrappers for tmux operations
-  claude_state.py     JSONL tail-reading to detect WORKING/WAITING/NOT_RUNNING
-  vcs.py              Git branch + dirty status detection
-  widgets/
-    project_table.py  DataTable showing all projects with status
-    detail_panel.py   Selected project detail view
-  screens/
-    dashboard.py      Main screen: table + detail panel, 2s refresh timer
-    open_project.py   Modal for opening a project by name or path
-    confirm.py        Yes/no confirmation modal
-  css/
-    app.tcss          Textual CSS layout
+# 3. Go to GitHub → Releases → Draft a new release
+#    Select tag v3.1.0 → write release notes → Publish release
+#    The CI workflow runs tests on Python 3.12 + 3.13, builds the package,
+#    then publishes to PyPI automatically.
 ```
 
-### Refresh cycle (every 2s)
+**One-time PyPI setup (first release only):**
+1. Create a `pypi` environment in your GitHub repo (Settings → Environments)
+2. On PyPI, go to your project → Publishing → add a trusted publisher:
+   - Owner: your GitHub username/org
+   - Repository: your repo name
+   - Workflow: `publish.yml`
+   - Environment: `pypi`
 
-1. Scan `auto_discover_dirs` for new repos
-2. Rename any tmux windows running claude to their project name
-3. `tmux list-panes -a` — single subprocess call for all windows
-4. For each configured project: match tmux pane, detect claude state, get git status
-5. Auto-discover unconfigured tmux windows running claude
-6. Update the table widget
+After that, no API tokens are needed — GitHub Actions authenticates via OIDC.
 
-### Claude state detection
+## Uninstall
 
-Session data lives in `~/.claude/projects/{sanitized-path}/{session-id}.jsonl`.
+```bash
+make uninstall      # pipx uninstall claudre
+```
 
-| Condition | State |
-|-----------|-------|
-| No claude process in tmux pane | NOT_RUNNING |
-| Claude running, JSONL mtime < 10s | WORKING |
-| Claude running, JSONL mtime > 10s, last message is `assistant` | WAITING |
-| Claude running, no JSONL found | WAITING (fresh session) |
+## Development
 
-Only the last 100KB of the JSONL file is read to find the final message role.
-
-## Tech stack
-
-- **Python 3.12+**
-- **Textual** — TUI framework
-- **Click** — CLI
-- **Pydantic** — config/model validation
-- **hatchling** — build backend
-- **uv** — package management
+```bash
+make dev            # install with dev dependencies into active venv
+make test           # run test suite
+make clean          # remove build artifacts
+```

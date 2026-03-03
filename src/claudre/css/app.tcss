@@ -16,7 +16,7 @@ Screen {
     height: 1fr;
 }
 
-ProjectTable {
+WindowTable {
     width: 3fr;
     height: 100%;
 }
@@ -26,38 +26,6 @@ DetailPanel {
     height: 100%;
     padding: 1 2;
     border-left: tall $accent;
-}
-
-#footer {
-    dock: bottom;
-    height: 1;
-    background: $surface;
-    color: $text-muted;
-    text-align: center;
-}
-
-/* Open project modal */
-OpenProjectScreen {
-    align: center middle;
-}
-
-#open-dialog {
-    width: 60;
-    height: auto;
-    max-height: 80%;
-    border: thick $accent;
-    background: $surface;
-    padding: 1 2;
-}
-
-#open-dialog ListView {
-    height: auto;
-    max-height: 20;
-    margin: 1 0;
-}
-
-#open-dialog Input {
-    margin: 1 0;
 }
 
 /* Confirm modal */
@@ -81,4 +49,113 @@ ConfirmScreen {
 
 #confirm-dialog Button {
     margin: 0 1;
+}
+
+/* Send message modal */
+SendMessageScreen {
+    align: center middle;
+}
+
+#send-dialog {
+    width: 70;
+    height: auto;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#send-dialog Input {
+    margin: 1 0;
+}
+
+/* Run command modal */
+RunCommandScreen {
+    align: center middle;
+}
+
+#run-dialog {
+    width: 70;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#run-dialog ListView {
+    height: auto;
+    max-height: 15;
+    margin: 1 0;
+}
+
+#run-dialog Input {
+    margin: 1 0;
+}
+
+/* New window modal */
+NewWindowScreen {
+    align: center middle;
+}
+
+#new-window-dialog {
+    width: 70;
+    height: auto;
+    max-height: 80%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+#new-window-dialog ListView {
+    height: auto;
+    max-height: 15;
+    margin: 1 0;
+}
+
+#new-window-dialog Input {
+    margin: 1 0;
+}
+
+/* Help screen */
+HelpScreen {
+    align: center middle;
+}
+
+#help-dialog {
+    width: 70;
+    height: auto;
+    max-height: 90%;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+}
+
+/* Filter input overlay */
+#filter-input {
+    dock: top;
+    height: 3;
+    width: 3fr;
+    margin: 0;
+}
+
+/* Row color coding by state — use DataTable row classes */
+.row--WAITING {
+    color: yellow;
+}
+
+.row--WORKING {
+    color: green;
+}
+
+.row--CRASHED {
+    color: red;
+}
+
+.row--SUSPENDED {
+    opacity: 0.6;
+}
+
+/* Stale summary */
+.summary--stale {
+    opacity: 0.5;
 }

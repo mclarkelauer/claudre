@@ -1,97 +1,179 @@
-"""Click CLI for claudre."""
+"""Click CLI entry point for claudre v3."""
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import click
 
-from claudre.config import load_config, save_config, discover_projects, ClaudreConfig, ProjectConfig
+from claudre.config import ConfigError, load_config
 
 
 class DefaultGroup(click.Group):
     """Click group that defaults to 'dashboard' when no subcommand is given."""
 
     def parse_args(self, ctx, args):
-        # Don't redirect --help to the dashboard subcommand
         if not args or (args[0] not in self.commands and args[0] not in ("--help", "-h")):
             args = ["dashboard"] + list(args)
         return super().parse_args(ctx, args)
 
 
 @click.group(cls=DefaultGroup)
-def main():
-    """claudre — Claude Session Manager TUI."""
-    pass
+@click.option("--debug", is_flag=True, default=False, help="Enable debug logging.")
+@click.option("--log-file", default="", metavar="PATH", help="Write logs to this file.")
+@click.pass_context
+def main(ctx: click.Context, debug: bool, log_file: str) -> None:
+    """claudre — Claude-native tmux session manager."""
+    ctx.ensure_object(dict)
+    ctx.obj["debug"] = debug
+    ctx.obj["log_file"] = log_file
+
+    from claudre.logger import setup_logging
+    setup_logging(log_path=log_file, debug=debug)
 
 
 @main.command()
-def dashboard():
+@click.pass_context
+def dashboard(ctx: click.Context) -> None:
     """Launch the persistent dashboard TUI."""
-    from claudre import tmux
+    try:
+        config = load_config()
+    except ConfigError as e:
+        raise click.ClickException(str(e))
 
-    config = load_config()
-    # Name the current tmux window so we can jump back to it
-    if tmux.is_inside_tmux():
-        tmux.rename_current_window(tmux.CLAUDRE_WINDOW_NAME)
+    import asyncio
+    import sys
+    from claudre.tmux_adapter import TmuxAdapter
+    tmux = TmuxAdapter()
 
-    from claudre.app import ClaudreApp
+    async def _switch_or_setup() -> bool:
+        """Switch to an existing claudre dashboard if one is open.
 
-    app = ClaudreApp(config, popup_mode=False)
+        Returns True if we switched (caller should exit), False if a new
+        dashboard should be launched (current window renamed to 'claudre').
+        """
+        if not await tmux.is_inside_tmux():
+            return False
+
+        session = await tmux.current_session()
+        current_idx = await tmux.current_window_index()
+        panes = await tmux.list_panes()
+        session_panes = [p for p in panes if p.session == session]
+
+        # Look for any window named "claudre" that isn't the current window
+        existing = [
+            p for p in session_panes
+            if p.window_name == "claudre" and p.window_index != current_idx
+        ]
+        if existing:
+            await tmux.select_window(existing[0].target)
+            return True
+
+        # No existing dashboard — rename current window and launch TUI
+        current_panes = [p for p in session_panes if p.window_index == current_idx]
+        if current_panes:
+            try:
+                await tmux.rename_window(current_panes[0].target, "claudre")
+            except Exception:
+                pass
+        return False
+
+    if asyncio.run(_switch_or_setup()):
+        sys.exit(0)
+
+    from textual.app import App
+    from claudre.screens.dashboard import DashboardScreen
+
+    class ClaudreApp(App):
+        CSS_PATH = Path(__file__).parent / "css" / "app.tcss"
+
+        def __init__(self, config) -> None:
+            super().__init__()
+            self._config = config
+
+        def on_mount(self) -> None:
+            self.push_screen(DashboardScreen(self._config))
+
+    app = ClaudreApp(config)
     app.run()
 
 
 @main.command()
-def popup():
-    """Launch popup mode — exits after switching to a project."""
-    config = load_config()
-    from claudre.app import ClaudreApp
+@click.argument("template", default="")
+@click.pass_context
+def new(ctx: click.Context, template: str) -> None:
+    """Create a new tmux window from a template (no TUI needed)."""
+    import asyncio
 
-    app = ClaudreApp(config, popup_mode=True)
+    try:
+        config = load_config()
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+
+    template_name = template or config.defaults.template
+    cwd = str(Path.cwd())
+    project_name = Path(cwd).name
+
+    async def _run():
+        from claudre.tmux_adapter import TmuxAdapter, WindowSpec
+        from claudre.templates import create_from_template
+
+        tmux = TmuxAdapter()
+        if not await tmux.is_inside_tmux():
+            raise click.ClickException("Not inside a tmux session")
+
+        session = await tmux.current_session()
+        spec = WindowSpec(
+            session=session,
+            template_name=template_name,
+            project_name=project_name,
+            start_directory=cwd,
+        )
+        pane = await create_from_template(tmux, spec, config)
+        click.echo(f"Created window '{project_name}' in session '{session}' (pane {pane.pane_id})")
+
+    asyncio.run(_run())
+
+
+@main.command()
+@click.pass_context
+def popup(ctx: click.Context) -> None:
+    """Quick window-switcher popup (run via: tmux display-popup -E 'claudre popup')."""
+    try:
+        config = load_config()
+    except ConfigError as e:
+        raise click.ClickException(str(e))
+
+    from claudre.screens.popup import PopupApp
+    app = PopupApp(config)
     app.run()
 
 
 @main.command()
-def init():
-    """Auto-discover repos from configured directories and update config."""
-    config = load_config()
-    before = set(config.projects.keys())
-    discovered = discover_projects(config)
-    for name in sorted(set(config.projects.keys()) - before):
-        click.echo(f"  + {name} ({config.projects[name].path})")
-    if discovered:
-        click.echo(f"\nDiscovered {discovered} project(s). Config saved.")
-    else:
-        click.echo("No new projects discovered.")
-
-
-@main.command()
-def setup():
-    """Install tmux keybinding (prefix + d) to jump back to claudre."""
-    import shutil
-    from pathlib import Path
-
-    # Find the claudre binary
-    claudre_bin = shutil.which("claudre")
-    if not claudre_bin:
-        # Fall back to the venv we're running from
-        claudre_bin = str(Path(__file__).resolve().parents[2] / ".." / ".." / ".venv" / "bin" / "claudre")
-        # Or just use sys.executable approach
-        import sys
-        claudre_bin = str(Path(sys.executable).parent / "claudre")
-
+@click.option("--status-bar", is_flag=True, help="Also add status bar integration")
+def setup(status_bar: bool) -> None:
+    """Install tmux keybindings (prefix+D, prefix+N, prefix+P) to ~/.tmux.conf."""
     tmux_conf = Path.home() / ".tmux.conf"
-    marker = "# claudre"
-    binding = f"bind d run-shell 'tmux select-window -t claudre 2>/dev/null || tmux new-window -n claudre {claudre_bin}'"
-    popup_binding = f"bind D display-popup -E -h 80% -w 80% '{claudre_bin} popup'"
+    marker = "# claudre-v3"
 
-    block = f"\n{marker}\n{binding}\n{popup_binding}\n"
+    lines_to_add = [
+        f"\n{marker}",
+        'bind-key D run-shell "tmux select-window -t claudre 2>/dev/null || true"',
+        'bind-key N run-shell "claudre new"',
+        'bind-key P display-popup -E -w 80% -h 40% "claudre popup"',
+    ]
+
+    if status_bar:
+        lines_to_add.append('set -g status-right "#{@claudre_status} | %H:%M"')
+
+    block = "\n".join(lines_to_add) + "\n"
 
     if tmux_conf.exists():
         content = tmux_conf.read_text()
         if marker in content:
-            # Replace existing block
-            import re
             content = re.sub(
-                r"\n?# claudre\n.*?(?=\n[^b]|\n$|\Z)",
+                r"\n?" + re.escape(marker) + r".*?(?=\n#[^#]|\n\n|\Z)",
                 block.rstrip(),
                 content,
                 flags=re.DOTALL,
@@ -100,80 +182,69 @@ def setup():
             click.echo("Updated claudre bindings in ~/.tmux.conf")
         else:
             tmux_conf.write_text(content.rstrip() + "\n" + block)
-            click.echo("Added to ~/.tmux.conf:")
+            click.echo("Appended claudre bindings to ~/.tmux.conf")
     else:
         tmux_conf.write_text(block)
-        click.echo("Created ~/.tmux.conf:")
+        click.echo("Created ~/.tmux.conf with claudre bindings")
 
-    click.echo(f"  prefix + d  → switch to claudre (or create)")
-    click.echo(f"  prefix + D  → claudre popup")
-    click.echo(f"  binary: {claudre_bin}")
+    click.echo("  prefix+D  → jump to claudre dashboard")
+    click.echo("  prefix+N  → create new window")
+    click.echo("  prefix+P  → quick window-switcher popup")
     click.echo("\nRun 'tmux source ~/.tmux.conf' to activate.")
 
 
 @main.command()
-def rename():
-    """Rename all tmux windows running claude to their project name."""
-    from claudre import tmux
+def init() -> None:
+    """Discover projects in auto_discover_dirs and print results."""
+    try:
+        config = load_config()
+    except ConfigError as e:
+        raise click.ClickException(str(e))
 
-    config = load_config()
-    renamed = tmux.rename_claude_windows(config.projects)
-    if renamed:
-        for old, new in renamed:
-            click.echo(f"  {old} → {new}")
-        click.echo(f"\nRenamed {len(renamed)} window(s).")
+    discovered = 0
+    for dir_path in config.auto_discover_dirs:
+        scan_dir = Path(dir_path).expanduser()
+        if not scan_dir.exists():
+            click.echo(f"  [skip] {scan_dir} — not found")
+            continue
+        for d in sorted(scan_dir.iterdir()):
+            if d.is_dir() and (d / ".git").exists():
+                name = d.name
+                if name not in config.projects:
+                    click.echo(f"  + {name} ({d})")
+                    discovered += 1
+
+    if discovered:
+        click.echo(f"\nDiscovered {discovered} project(s).")
+        click.echo("Add them to ~/.claudre/config.toml manually or use claudre init --save.")
     else:
-        click.echo("All claude windows already named correctly.")
+        click.echo("No new projects discovered.")
 
 
 @main.command("list")
-def list_cmd():
-    """Print project status table to stdout."""
-    from claudre import claude_state, tmux, vcs
-    from claudre.models import TmuxWindow
+def list_cmd() -> None:
+    """Print window status table to stdout (no TUI)."""
+    import asyncio
 
-    config = load_config()
-    panes = tmux.list_all_panes()
+    async def _run():
+        from claudre.tmux_adapter import TmuxAdapter
+        from claudre.state_detector import JournalStateDetector
 
-    # Header
-    click.echo(f"{'Project':<20} {'Window':<15} {'Branch':<20} {'Dirty':<6} {'Claude':<10}")
-    click.echo("-" * 71)
+        tmux = TmuxAdapter()
+        detector = JournalStateDetector()
+        panes = await tmux.list_panes()
 
-    for name, proj_cfg in config.projects.items():
-        path = proj_cfg.path
-        tw = _match_pane(panes, path)
-        window = ""
-        if tw:
-            window = f"{tw.session}:{tw.window_index}"
+        click.echo(f"{'Pane':<12} {'Window':<12} {'Project':<20} {'State':<12}")
+        click.echo("-" * 60)
 
-        process_running = _is_claude_running(tw, panes)
-        state = claude_state.detect_state(path, process_running)
-        vcs_status = vcs.get_vcs_status(path)
+        for pane in panes:
+            state = await detector.detect(pane)
+            project = Path(pane.pane_path).name or pane.window_name
+            click.echo(
+                f"{pane.pane_id:<12} {pane.target:<12} {project:<20} {state.value:<12}"
+            )
 
-        branch = vcs_status.branch or ""
-        dirty = "*" if vcs_status.dirty else ""
-
-        click.echo(f"{name:<20} {window:<15} {branch:<20} {dirty:<6} {state.value:<10}")
-
-
-def _match_pane(panes, path) -> object | None:
-    for pane in panes:
-        if pane.pane_path == path:
-            return pane
-    return None
-
-
-def _is_claude_running(matched_pane, all_panes) -> bool:
-    if matched_pane is None:
-        return False
-    for pane in all_panes:
-        if (
-            pane.session == matched_pane.session
-            and pane.window_index == matched_pane.window_index
-            and pane.pane_command == "claude"
-        ):
-            return True
-    return False
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

@@ -1,43 +1,59 @@
-"""Detail panel showing selected project info."""
+"""Detail panel showing full info for the selected window."""
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
+
 from textual.widgets import Static
 
-from claudre.models import ClaudeState, ProjectState
+from claudre.models import ClaudeState, WindowState
 
 
 class DetailPanel(Static):
-    """Panel showing details of the selected project."""
+    """Panel showing details of the selected tmux window."""
 
-    def update_project(self, project: ProjectState | None) -> None:
-        if project is None:
-            self.update("[dim]No project selected[/]")
+    def update_window(self, ws: WindowState | None) -> None:
+        if ws is None:
+            self.update("[dim]No window selected[/]")
             return
 
-        lines = [
-            f"[bold]{project.name}[/]",
-            f"  Path: {project.path}",
-        ]
-        if project.vcs.vcs_type:
-            branch_str = project.vcs.branch or "(detached)"
-            dirty_str = " [bold red]*dirty*[/]" if project.vcs.dirty else ""
-            lines.append(f"  Branch: {branch_str}{dirty_str}")
+        lines: list[str] = [f"[bold]{ws.project_name}[/]", f"  Path: {ws.path}"]
 
-        if project.tmux_window:
-            tw = project.tmux_window
-            lines.append(f"  Window: {tw.session}:{tw.window_index} ({tw.window_name})")
-        else:
-            lines.append("  Window: [dim]not open[/]")
-
-        state_str = {
+        # State
+        state_map = {
             ClaudeState.WORKING: "[bold green]WORKING[/]",
             ClaudeState.WAITING: "[bold yellow]WAITING[/]",
-            ClaudeState.NOT_RUNNING: "[dim]not running[/]",
-        }[project.claude_state]
-        lines.append(f"  Claude: {state_str}")
+            ClaudeState.CRASHED: "[bold red]CRASHED[/]",
+            ClaudeState.SUSPENDED: "[dim]SUSPENDED[/]",
+            ClaudeState.IDLE: "[dim]idle[/]",
+            ClaudeState.OPENING: "[cyan]OPENING[/]",
+            ClaudeState.UNKNOWN: "[dim]unknown[/]",
+        }
+        lines.append(f"  State: {state_map.get(ws.state, str(ws.state))}")
 
-        if not project.configured:
-            lines.append("  [dim italic](auto-discovered)[/]")
+        # VCS
+        if ws.vcs.vcs_type:
+            branch = ws.vcs.branch or "(detached)"
+            dirty = " [bold red]*dirty*[/]" if ws.vcs.dirty else ""
+            lines.append(f"  Branch: {branch}{dirty}")
+
+        # Pane info
+        lines.append(f"  Pane: {ws.pane_id}")
+        managed = "[green]yes[/]" if ws.managed else "[dim]no[/]"
+        lines.append(f"  Managed: {managed}")
+
+        # Summary
+        lines.append("")
+        if ws.summary:
+            stale = " [dim](stale)[/]" if ws.summary_stale else ""
+            lines.append(f"[bold]Summary[/]{stale}")
+            lines.append(f"  {ws.summary}")
+
+            if ws.summary_updated_at:
+                age = int(time.time() - ws.summary_updated_at.timestamp())
+                lines.append(f"  [dim]Updated {age}s ago[/]")
+        else:
+            lines.append("[dim]No summary yet (press u to generate)[/]")
 
         self.update("\n".join(lines))

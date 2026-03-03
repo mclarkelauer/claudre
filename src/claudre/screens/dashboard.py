@@ -1,4 +1,4 @@
-"""Main dashboard screen."""
+"""Main dashboard screen for claudre v3."""
 
 from __future__ import annotations
 
@@ -8,195 +8,289 @@ from pathlib import Path
 from textual import on, work
 from textual.screen import Screen
 from textual.containers import Horizontal
-from textual.widgets import Footer, Static
+from textual.widgets import Footer, Input, Static
 
-from claudre import claude_state, tmux, vcs
-from claudre.config import ClaudreConfig, discover_projects
-from claudre.models import ClaudeState, ProjectState, TmuxWindow
+from claudre.config import ClaudreConfig
+from claudre.logger import get_logger
+from claudre.models import (
+    RegistryEvent,
+    SummaryUpdated,
+    WindowAdded,
+    WindowRemoved,
+    WindowState,
+    WindowStateChanged,
+)
+from claudre.registry import SessionRegistry
+from claudre.state_detector import JournalStateDetector
+from claudre.summary_engine import SummaryEngine
+from claudre.tmux_adapter import TmuxAdapter
+from claudre.vcs import VcsCache
 from claudre.widgets.detail_panel import DetailPanel
-from claudre.widgets.project_table import ProjectTable
+from claudre.widgets.toast import ToastManager
+from claudre.widgets.window_table import WindowTable
+
+log = get_logger(__name__)
 
 
 class DashboardScreen(Screen):
     BINDINGS = [
-        ("x", "close_project", "Close"),
-        ("r", "refresh", "Refresh"),
+        ("enter", "jump", "Jump"),
+        ("n", "new_window", "New"),
+        ("x", "close_window", "Close"),
+        ("s", "send_message", "Send"),
+        ("r", "run_command", "Run"),
+        ("u", "update_summary", "Summary"),
+        ("shift+r", "force_refresh", "Refresh"),
+        ("/", "filter", "Filter"),
+        ("?", "help", "Help"),
         ("q", "quit_app", "Quit"),
     ]
 
-    def __init__(self, config: ClaudreConfig, popup_mode: bool = False) -> None:
+    CSS_PATH = Path(__file__).parents[1] / "css" / "app.tcss"
+
+    def __init__(self, config: ClaudreConfig) -> None:
         super().__init__()
-        self.config = config
-        self.popup_mode = popup_mode
-        self._projects: list[ProjectState] = []
-        self._refresh_timer = None
+        self._config = config
+        self._tmux = TmuxAdapter()
+        self._vcs = VcsCache(ttl=config.vcs_cache_ttl)
+        self._detector = JournalStateDetector()
+        self._summary = SummaryEngine(config, self._tmux, detector=self._detector)
+        self._registry = SessionRegistry(
+            config=config,
+            tmux=self._tmux,
+            detector=self._detector,
+            vcs=self._vcs,
+            summary=self._summary,
+        )
+        self._toast: ToastManager | None = None
+        self._filter_visible = False
 
     def compose(self):
-        title = "claudre" if not self.popup_mode else "claudre [popup]"
-        yield Static(f" {title} ", id="header")
+        yield Static(" claudre ", id="header")
         with Horizontal(id="body"):
-            yield ProjectTable(id="project-table")
+            yield WindowTable(id="window-table")
             yield DetailPanel(id="detail-panel")
         yield Footer()
 
     def on_mount(self) -> None:
-        self.do_refresh()
-        self._refresh_timer = self.set_interval(
-            self.config.refresh_interval, self.do_refresh
+        self._toast = ToastManager(self.app)
+        self._registry.subscribe(self._on_registry_event)
+        self._start_registry()
+
+    @work(exclusive=True)
+    async def _start_registry(self) -> None:
+        await self._registry.start()
+
+    def on_unmount(self) -> None:
+        asyncio.ensure_future(self._registry.stop())
+
+    # ------------------------------------------------------------------ #
+    # Registry event handler (called from background task via call_from_thread)
+    # ------------------------------------------------------------------ #
+
+    def _on_registry_event(self, event: RegistryEvent) -> None:
+        """Dispatch registry events to UI updates (called on the event loop)."""
+        self.call_later(self._apply_event, event)
+
+    def _apply_event(self, event: RegistryEvent) -> None:
+        table = self.query_one(WindowTable)
+
+        if isinstance(event, WindowAdded):
+            ws = self._registry.windows.get(event.pane_id)
+            if ws:
+                table.add_window(ws)
+        elif isinstance(event, WindowRemoved):
+            table.remove_window(event.pane_id)
+            self._update_detail(None)
+        elif isinstance(event, WindowStateChanged):
+            ws = self._registry.windows.get(event.pane_id)
+            if ws:
+                table.update_window(ws)
+                if event.pane_id == table.get_selected_pane_id():
+                    self._update_detail(ws)
+                # Toast on WORKING → WAITING transition
+                from claudre.models import ClaudeState
+                if (
+                    self._config.notification_on_waiting
+                    and event.old == ClaudeState.WORKING
+                    and event.new == ClaudeState.WAITING
+                    and self._toast
+                ):
+                    msg = ws.summary or "waiting for input"
+                    self._toast.show(f"{ws.project_name}: {msg[:60]}")
+        elif isinstance(event, SummaryUpdated):
+            ws = self._registry.windows.get(event.pane_id)
+            if ws:
+                table.update_window(ws)
+                if event.pane_id == table.get_selected_pane_id():
+                    self._update_detail(ws)
+
+    def _update_detail(self, ws: WindowState | None) -> None:
+        detail = self.query_one(DetailPanel)
+        if ws is None:
+            table = self.query_one(WindowTable)
+            pane_id = table.get_selected_pane_id()
+            ws = self._registry.windows.get(pane_id or "") if pane_id else None
+        detail.update_window(ws)
+
+    @on(WindowTable.RowHighlighted)
+    def on_row_highlighted(self, event: WindowTable.RowHighlighted) -> None:
+        self._update_detail(None)
+
+    # ------------------------------------------------------------------ #
+    # Actions
+    # ------------------------------------------------------------------ #
+
+    def action_jump(self) -> None:
+        ws = self._selected_window()
+        if ws and ws.session and ws.window_index:
+            asyncio.ensure_future(self._tmux.select_window(ws.target))
+
+    def action_new_window(self) -> None:
+        async def _do_new() -> None:
+            session = await self._tmux.current_session()
+            self.app.push_screen(
+                _new_window_screen(self._config, session),
+                self._on_new_window_result,
+            )
+
+        asyncio.ensure_future(_do_new())
+
+    def _on_new_window_result(self, result: object) -> None:
+        if result is None:
+            return
+        from claudre.templates import create_from_template
+        from claudre.tmux_adapter import WindowSpec
+
+        async def _create() -> None:
+            try:
+                spec = WindowSpec(
+                    session=result.session if hasattr(result, "session") else "",
+                    template_name=result.template_name,
+                    project_name=result.project_name,
+                    start_directory=result.start_directory,
+                )
+                # Use current session if not set
+                if not spec.session:
+                    spec.session = await self._tmux.current_session()
+                await create_from_template(self._tmux, spec, self._config)
+                if self._toast:
+                    self._toast.show(f"Created window: {result.project_name}")
+            except Exception as e:
+                log.error("Failed to create window: %s", e)
+                if self._toast:
+                    self._toast.show(f"Error: {e}")
+
+        asyncio.ensure_future(_create())
+
+    def action_close_window(self) -> None:
+        ws = self._selected_window()
+        if not ws:
+            return
+
+        from claudre.screens.confirm import ConfirmScreen
+
+        def on_confirm(confirmed: bool) -> None:
+            if confirmed and ws:
+                target = ws.pane_id.rsplit(".", 1)[0] if "." in ws.pane_id else ws.pane_id
+                asyncio.ensure_future(self._tmux.kill_window(target))
+
+        self.app.push_screen(
+            ConfirmScreen(f"Close window '{ws.project_name}'?"), on_confirm
         )
 
-    @work(thread=True)
-    def do_refresh(self) -> None:
-        projects = self._collect_projects()
-        self.app.call_from_thread(self._apply_refresh, projects)
-
-    def _apply_refresh(self, projects: list[ProjectState]) -> None:
-        self._projects = projects
-        table = self.query_one(ProjectTable)
-        table.update_projects(projects)
-        self._update_detail()
-
-    def _collect_projects(self) -> list[ProjectState]:
-        """Collect state for all projects (runs in thread)."""
-        # Auto-discover new repos from configured directories
-        discover_projects(self.config)
-
-        # Rename any claude windows to their project name
-        tmux.rename_claude_windows(self.config.projects)
-
-        panes = tmux.list_all_panes()
-        projects: list[ProjectState] = []
-
-        # Configured projects
-        for name, proj_cfg in self.config.projects.items():
-            proj_path = proj_cfg.path
-            tw = _match_pane(panes, proj_path)
-            process_running = _is_claude_running(tw, panes)
-            state = claude_state.detect_state(proj_path, process_running)
-            vcs_status = vcs.get_vcs_status(proj_path)
-            projects.append(
-                ProjectState(
-                    name=name,
-                    path=proj_path,
-                    configured=True,
-                    tmux_window=tw,
-                    claude_state=state,
-                    vcs=vcs_status,
-                )
-            )
-
-        # Auto-discover unconfigured tmux windows running claude
-        configured_paths = {p.path for p in self.config.projects.values()}
-        seen_paths: set[str] = set()
-        for pane in panes:
-            if pane.pane_command == "claude" and pane.pane_path not in configured_paths:
-                if pane.pane_path in seen_paths:
-                    continue
-                seen_paths.add(pane.pane_path)
-                vcs_status = vcs.get_vcs_status(pane.pane_path)
-                state = claude_state.detect_state(pane.pane_path, True)
-                name = Path(pane.pane_path).name
-                projects.append(
-                    ProjectState(
-                        name=name,
-                        path=pane.pane_path,
-                        configured=False,
-                        tmux_window=pane,
-                        claude_state=state,
-                        vcs=vcs_status,
-                    )
-                )
-
-        return projects
-
-    @on(ProjectTable.RowSelected)
-    def on_row_selected(self, event: ProjectTable.RowSelected) -> None:
-        self.action_select_project()
-
-    @on(ProjectTable.RowHighlighted)
-    def on_row_highlighted(self, event: ProjectTable.RowHighlighted) -> None:
-        self._update_detail()
-
-    def _update_detail(self) -> None:
-        table = self.query_one(ProjectTable)
-        detail = self.query_one(DetailPanel)
-        name = table.get_selected_project_name()
-        proj = next((p for p in self._projects if p.name == name), None)
-        detail.update_project(proj)
-
-    def _get_selected_project(self) -> ProjectState | None:
-        table = self.query_one(ProjectTable)
-        name = table.get_selected_project_name()
-        return next((p for p in self._projects if p.name == name), None)
-
-    def action_refresh(self) -> None:
-        self.do_refresh()
-
-    def action_select_project(self) -> None:
-        proj = self._get_selected_project()
-        if not proj:
+    def action_send_message(self) -> None:
+        ws = self._selected_window()
+        if not ws:
             return
-        if proj.tmux_window:
-            # Already open — switch to it
-            tmux.switch_to_window(proj.tmux_window.target)
-            if self.popup_mode:
-                self.app.exit()
+        from claudre.screens.send_message import SendMessageScreen
+
+        def on_send(text: str | None) -> None:
+            if text and ws:
+                asyncio.ensure_future(self._tmux.send_keys(ws.pane_id, text))
+                # Queue summary update with delay
+                async def _delayed_summary() -> None:
+                    await asyncio.sleep(5)
+                    self._registry.request_summary(ws.pane_id)
+
+                asyncio.ensure_future(_delayed_summary())
+
+        self.app.push_screen(SendMessageScreen(ws.project_name), on_send)
+
+    def action_run_command(self) -> None:
+        ws = self._selected_window()
+        if not ws:
+            return
+        proj_cfg = self._config.projects.get(ws.project_name)
+        quick_actions = proj_cfg.quick_actions if proj_cfg else []
+        from claudre.screens.run_command import RunCommandScreen
+
+        def on_run(cmd: str | None) -> None:
+            if cmd and ws:
+                asyncio.ensure_future(self._tmux.send_keys(ws.pane_id, cmd))
+
+        self.app.push_screen(RunCommandScreen(ws.project_name, quick_actions), on_run)
+
+    def action_update_summary(self) -> None:
+        ws = self._selected_window()
+        if not ws:
+            return
+        self._registry.request_summary(ws.pane_id)
+        if self._toast:
+            self._toast.show("Summary refresh queued…")
+
+    def action_force_refresh(self) -> None:
+        table = self.query_one(WindowTable)
+        table.rebuild(self._registry.windows)
+
+    def action_filter(self) -> None:
+        self._toggle_filter()
+
+    def _toggle_filter(self) -> None:
+        if self._filter_visible:
+            # Hide filter
+            try:
+                self.query_one("#filter-input").remove()
+            except Exception:
+                pass
+            self._filter_visible = False
+            self.query_one(WindowTable).set_filter("")
         else:
-            # Not open — create window, then switch to it
-            proj_cfg = self.config.projects.get(proj.name)
-            if proj_cfg:
-                layout = self.config.get_layout(proj_cfg)
-                claude_cmd = self.config.get_claude_cmd(proj_cfg)
-            else:
-                layout = self.config.defaults.layout
-                claude_cmd = self.config.defaults.claude_command
-            tmux.create_project_window(proj.name, proj.path, layout, claude_cmd)
-            if self.popup_mode:
-                self.app.exit()
-            else:
-                # Switch back to claudre so dashboard stays visible
-                claudre_target = tmux.find_claudre_window()
-                if claudre_target:
-                    tmux.switch_to_window(claudre_target)
-                self.do_refresh()
+            inp = Input(placeholder="Filter…", id="filter-input")
+            self.query_one(WindowTable).mount(inp, before=self.query_one(WindowTable))
+            inp.focus()
+            self._filter_visible = True
 
-    def action_close_project(self) -> None:
-        proj = self._get_selected_project()
-        if proj and proj.tmux_window:
-            from claudre.screens.confirm import ConfirmScreen
+    @on(Input.Changed, "#filter-input")
+    def on_filter_changed(self, event: Input.Changed) -> None:
+        self.query_one(WindowTable).set_filter(event.value)
+        # Rebuild visible rows
+        self.query_one(WindowTable).rebuild(self._registry.windows)
 
-            def on_confirm(confirmed: bool) -> None:
-                if confirmed and proj.tmux_window:
-                    tmux.kill_window(proj.tmux_window.target)
-                    self.do_refresh()
+    @on(Input.Submitted, "#filter-input")
+    def on_filter_submitted(self, event: Input.Submitted) -> None:
+        self._toggle_filter()
+        self.query_one(WindowTable).focus()
 
-            self.app.push_screen(
-                ConfirmScreen(f"Close project '{proj.name}'?"), on_confirm
-            )
+    def action_help(self) -> None:
+        from claudre.screens.help import HelpScreen
+        self.app.push_screen(HelpScreen())
 
     def action_quit_app(self) -> None:
         self.app.exit()
 
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
 
-def _match_pane(panes: list[TmuxWindow], path: str) -> TmuxWindow | None:
-    """Find a tmux pane whose path matches the project path."""
-    for pane in panes:
-        if pane.pane_path == path:
-            return pane
-    return None
+    def _selected_window(self) -> WindowState | None:
+        table = self.query_one(WindowTable)
+        pane_id = table.get_selected_pane_id()
+        if not pane_id:
+            return None
+        return self._registry.windows.get(pane_id)
 
 
-def _is_claude_running(
-    matched_pane: TmuxWindow | None, all_panes: list[TmuxWindow]
-) -> bool:
-    """Check if any pane in the same window is running claude."""
-    if matched_pane is None:
-        return False
-    for pane in all_panes:
-        if (
-            pane.session == matched_pane.session
-            and pane.window_index == matched_pane.window_index
-            and pane.pane_command == "claude"
-        ):
-            return True
-    return False
+def _new_window_screen(config: ClaudreConfig, session: str):
+    from claudre.screens.new_window import NewWindowScreen
+    return NewWindowScreen(config=config, session=session)
